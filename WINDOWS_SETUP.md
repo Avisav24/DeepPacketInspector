@@ -3,7 +3,6 @@
 This guide will help you build and run the DPI Engine on Windows. Follow these steps exactly.
 
 ---
-
 ## Option 1: Using Visual Studio (Recommended for Beginners)
 
 ### Step 1: Install Visual Studio
