@@ -1,0 +1,20 @@
+# Java build artifacts
+java_dpi/out/
+java_dpi/target/
+*.class
+*.jar
+
+# Generated output PCAP files
+output*.pcap
+test_blocked*.pcap
+test_output*.pcap
+*result*.pcap
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+*.iml
+.vscode/
