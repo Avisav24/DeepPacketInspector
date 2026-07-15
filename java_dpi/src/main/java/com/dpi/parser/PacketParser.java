@@ -59,33 +59,61 @@ public class PacketParser {
         offset = 14;
 
         // ── IPv4 Header ────────────────────────────────────────────────────
-        if (p.etherType != ETHERTYPE_IPV4) {
-            // Not IPv4 — return what we have (no transport layer)
+        if (p.etherType == ETHERTYPE_IPV4) {
+            if (len < offset + 20) return null; // Packet too short for IP header
+
+            int versionIhl = data[offset] & 0xFF;
+            p.ipVersion    = (versionIhl >> 4) & 0x0F;
+            int ihl        = versionIhl & 0x0F;
+
+            if (p.ipVersion != 4) return null; // Not IPv4
+
+            int ipHeaderLen = ihl * 4;
+            if (ipHeaderLen < 20 || len < offset + ipHeaderLen) return null;
+
+            p.ttl      = data[offset + 8] & 0xFF;
+            p.protocol = data[offset + 9] & 0xFF;
+
+            p.srcIpBytes = new byte[4];
+            p.dstIpBytes = new byte[4];
+            System.arraycopy(data, offset + 12, p.srcIpBytes, 0, 4);
+            System.arraycopy(data, offset + 16, p.dstIpBytes, 0, 4);
+            p.srcIp = FiveTuple.ipToString(p.srcIpBytes);
+            p.dstIp = FiveTuple.ipToString(p.dstIpBytes);
+
+            p.hasIp = true;
+            offset += ipHeaderLen;
+
+        // ── IPv6 Header ────────────────────────────────────────────────────
+        } else if (p.etherType == ETHERTYPE_IPV6) {
+            if (len < offset + 40) return null; // IPv6 header is 40 bytes fixed
+
+            int versionClassFlow = data[offset] & 0xFF;
+            p.ipVersion = (versionClassFlow >> 4) & 0x0F;
+
+            if (p.ipVersion != 6) return null; // Not IPv6
+
+            p.protocol = data[offset + 6] & 0xFF; // Next Header
+            p.ttl      = data[offset + 7] & 0xFF; // Hop Limit
+
+            p.srcIpBytes = new byte[16];
+            p.dstIpBytes = new byte[16];
+            System.arraycopy(data, offset + 8, p.srcIpBytes, 0, 16);
+            System.arraycopy(data, offset + 24, p.dstIpBytes, 0, 16);
+            p.srcIp = FiveTuple.ipToString(p.srcIpBytes);
+            p.dstIp = FiveTuple.ipToString(p.dstIpBytes);
+
+            p.hasIp = true;
+            p.hasIpV6 = true;
+            offset += 40;
+
+            // Simplified: If next header is an extension header (e.g. 0=Hop-by-Hop),
+            // we'd need to skip it. For this basic DPI, we just assume TCP/UDP are 
+            // directly next. If not, it won't match TCP/UDP and will be skipped.
+        } else {
+            // Not IPv4/IPv6 — return what we have
             return p;
         }
-
-        if (len < offset + 20) return null; // Packet too short for IP header
-
-        int versionIhl = data[offset] & 0xFF;
-        p.ipVersion    = (versionIhl >> 4) & 0x0F;
-        int ihl        = versionIhl & 0x0F;
-
-        if (p.ipVersion != 4) return null; // Not IPv4
-
-        int ipHeaderLen = ihl * 4;
-        if (ipHeaderLen < 20 || len < offset + ipHeaderLen) return null;
-
-        p.ttl      = data[offset + 8] & 0xFF;
-        p.protocol = data[offset + 9] & 0xFF;
-
-        // Source IP (bytes 12-15 of IP header)
-        p.srcIpInt  = readIp(data, offset + 12);
-        p.dstIpInt  = readIp(data, offset + 16);
-        p.srcIp     = FiveTuple.ipToString(p.srcIpInt);
-        p.dstIp     = FiveTuple.ipToString(p.dstIpInt);
-
-        p.hasIp = true;
-        offset += ipHeaderLen;
 
         // ── TCP Header ─────────────────────────────────────────────────────
         if (p.protocol == PROTO_TCP) {
@@ -138,19 +166,6 @@ public class PacketParser {
                ((data[offset + 1] & 0xFFL) << 16) |
                ((data[offset + 2] & 0xFFL) << 8)  |
                ((data[offset + 3] & 0xFFL));
-    }
-
-    /**
-     * Read a 32-bit IPv4 address stored in network byte order (big-endian in the packet).
-     * Returns it as an int where byte[0] is in the least-significant position —
-     * matching the C++ implementation's little-endian storage.
-     */
-    static int readIp(byte[] data, int offset) {
-        // C++ stores IP in "natural" order: first octet in lowest byte
-        return  (data[offset]     & 0xFF)        |
-               ((data[offset + 1] & 0xFF) << 8)  |
-               ((data[offset + 2] & 0xFF) << 16) |
-               ((data[offset + 3] & 0xFF) << 24);
     }
 
     /** Format a 6-byte MAC address as "aa:bb:cc:dd:ee:ff". */

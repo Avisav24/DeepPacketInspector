@@ -1,24 +1,23 @@
 package com.dpi.types;
 
-import java.util.Objects;
+import java.util.Arrays;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 
 /**
  * Five-tuple that uniquely identifies a network connection/flow.
- * Maps to the FiveTuple struct in types.h.
  *
- * IPs are stored as int (Java has no unsigned int) — use Integer.toUnsignedLong()
- * when doing arithmetic comparisons.
- * Ports and protocol are stored as int with only the lower bits used.
+ * Supports both IPv4 (4 bytes) and IPv6 (16 bytes).
  */
 public final class FiveTuple {
 
-    public final int srcIp;      // 32-bit IPv4 address (network byte order)
-    public final int dstIp;      // 32-bit IPv4 address (network byte order)
+    public final byte[] srcIp;   // 4 bytes for IPv4, 16 for IPv6
+    public final byte[] dstIp;   // 4 bytes for IPv4, 16 for IPv6
     public final int srcPort;    // 0–65535
     public final int dstPort;    // 0–65535
     public final int protocol;   // TCP=6, UDP=17
 
-    public FiveTuple(int srcIp, int dstIp, int srcPort, int dstPort, int protocol) {
+    public FiveTuple(byte[] srcIp, byte[] dstIp, int srcPort, int dstPort, int protocol) {
         this.srcIp    = srcIp;
         this.dstIp    = dstIp;
         this.srcPort  = srcPort;
@@ -36,23 +35,30 @@ public final class FiveTuple {
         if (this == o) return true;
         if (!(o instanceof FiveTuple)) return false;
         FiveTuple other = (FiveTuple) o;
-        return srcIp    == other.srcIp    &&
-               dstIp    == other.dstIp    &&
-               srcPort  == other.srcPort  &&
+        return srcPort  == other.srcPort  &&
                dstPort  == other.dstPort  &&
-               protocol == other.protocol;
+               protocol == other.protocol &&
+               Arrays.equals(srcIp, other.srcIp) &&
+               Arrays.equals(dstIp, other.dstIp);
     }
 
     @Override
     public int hashCode() {
-        // Mirrors the C++ FiveTupleHash — boost-style hash combining
         long h = 0;
-        h = combine(h, Integer.toUnsignedLong(srcIp));
-        h = combine(h, Integer.toUnsignedLong(dstIp));
+        h = combineBytes(h, srcIp);
+        h = combineBytes(h, dstIp);
         h = combine(h, srcPort & 0xFFFFL);
         h = combine(h, dstPort & 0xFFFFL);
         h = combine(h, protocol & 0xFFL);
         return (int)(h ^ (h >>> 32));
+    }
+
+    private static long combineBytes(long h, byte[] bytes) {
+        if (bytes == null) return h;
+        for (byte b : bytes) {
+            h = combine(h, b & 0xFFL);
+        }
+        return h;
     }
 
     private static long combine(long h, long value) {
@@ -69,31 +75,25 @@ public final class FiveTuple {
                " (" + (protocol == 6 ? "TCP" : protocol == 17 ? "UDP" : "?") + ")";
     }
 
-    /** Convert a 32-bit IP int (in network byte order) to dotted-decimal. */
-    public static String ipToString(int ip) {
-        // Network byte order: byte 0 is most significant
-        return ((ip >>> 0) & 0xFF) + "." +
-               ((ip >>> 8) & 0xFF) + "." +
-               ((ip >>> 16) & 0xFF) + "." +
-               ((ip >>> 24) & 0xFF);
+    /** Convert a byte array IP to its string representation. */
+    public static String ipToString(byte[] ip) {
+        if (ip == null) return "null";
+        try {
+            return InetAddress.getByAddress(ip).getHostAddress();
+        } catch (UnknownHostException e) {
+            return "<invalid ip>";
+        }
     }
 
     /**
-     * Parse a dotted-decimal IP string into a 32-bit int.
-     * Stored in "little-endian" order matching the C++ implementation
-     * (first octet in lowest byte).
+     * Parse a string IP (IPv4 or IPv6) into a byte array.
      */
-    public static int parseIp(String ip) {
-        String[] parts = ip.split("\\.");
-        if (parts.length != 4) return 0;
+    public static byte[] parseIp(String ip) {
+        if (ip == null || ip.isEmpty()) return null;
         try {
-            int result = 0;
-            for (int i = 0; i < 4; i++) {
-                result |= (Integer.parseInt(parts[i]) & 0xFF) << (i * 8);
-            }
-            return result;
-        } catch (NumberFormatException e) {
-            return 0;
+            return InetAddress.getByName(ip).getAddress();
+        } catch (UnknownHostException e) {
+            return null;
         }
     }
 }

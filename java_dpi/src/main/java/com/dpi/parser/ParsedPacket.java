@@ -17,11 +17,12 @@ public class ParsedPacket {
 
     // IP layer
     public boolean hasIp      = false;
+    public boolean hasIpV6    = false;
     public int     ipVersion;
     public String  srcIp;
     public String  dstIp;
-    public int     srcIpInt;  // 32-bit int representation (same as FiveTuple)
-    public int     dstIpInt;
+    public byte[]  srcIpBytes;
+    public byte[]  dstIpBytes;
     public int     protocol;  // TCP=6, UDP=17, ICMP=1
     public int     ttl;
 

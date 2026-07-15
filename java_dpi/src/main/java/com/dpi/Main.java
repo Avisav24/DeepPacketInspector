@@ -26,7 +26,8 @@ import java.util.*;
  *   java -jar dpi.jar <input.pcap> <output.pcap> [options]
  *
  * Options:
- *   --block-ip <ip>         Block traffic from source IP
+ *   -i <interface>          Capture from live interface instead of file
+ *   --block-ip <ip>         Block traffic from source IP (IPv4 or IPv6)
  *   --block-app <app>       Block application (YouTube, Facebook, etc.)
  *   --block-domain <domain> Block domain (substring match)
  *   --block-port <port>     Block destination port
@@ -38,28 +39,45 @@ import java.util.*;
 public class Main {
 
     public static void main(String[] args) {
-        if (args.length < 2) {
+        if (args.length < 1) {
             printUsage();
             System.exit(1);
         }
 
-        String inputFile  = args[0];
-        String outputFile = args[1];
+        String inputFile = null;
+        String outputFile = null;
+        String liveInterface = null;
+        
+        // Parse basic positional arguments unless it starts with '-'
+        int argIdx = 0;
+        if (!args[argIdx].startsWith("-")) {
+            inputFile = args[argIdx++];
+            if (argIdx < args.length && !args[argIdx].startsWith("-")) {
+                outputFile = args[argIdx++];
+            }
+        }
+
         boolean verbose   = false;
         boolean multiThreaded = false;
 
         // ── Simplified blocking rules (mirrors main_working.cpp) ──────────
-        Set<Integer>  blockedIPs     = new HashSet<>();
+        Set<String>   blockedIPs     = new HashSet<>();
         Set<AppType>  blockedApps    = new HashSet<>();
         List<String>  blockedDomains = new ArrayList<>();
 
         // Parse CLI options
-        for (int i = 2; i < args.length; i++) {
+        for (int i = argIdx; i < args.length; i++) {
             switch (args[i]) {
+                case "-i":
+                    if (i + 1 < args.length) {
+                        liveInterface = args[++i];
+                    }
+                    break;
+
                 case "--block-ip":
                     if (i + 1 < args.length) {
                         String ip = args[++i];
-                        blockedIPs.add(FiveTuple.parseIp(ip));
+                        blockedIPs.add(ip);
                         System.out.println("[Rules] Blocked IP: " + ip);
                     }
                     break;
@@ -101,34 +119,48 @@ public class Main {
         // Print banner
         System.out.println();
         System.out.println("╔══════════════════════════════════════════════════════════════╗");
-        System.out.println("║                    DPI ENGINE v1.0 (Java)                    ║");
+        System.out.println("║                    DPI ENGINE v1.1 (Java)                    ║");
         System.out.println("╚══════════════════════════════════════════════════════════════╝");
         System.out.println();
 
-        // ── Open input PCAP ───────────────────────────────────────────────
-        PcapReader reader = new PcapReader();
-        if (!reader.open(inputFile)) {
-            System.exit(1);
+        // ── Initialize Capture ───────────────────────────────────────────────
+        PcapReader fileReader = null;
+        com.dpi.pcap.LivePcapReader liveReader = null;
+
+        if (liveInterface != null) {
+            liveReader = new com.dpi.pcap.LivePcapReader();
+            if (!liveReader.open(liveInterface)) {
+                System.exit(1);
+            }
+        } else {
+            if (inputFile == null) {
+                System.err.println("Error: Must specify an input PCAP file or -i <interface>");
+                printUsage();
+                System.exit(1);
+            }
+            fileReader = new PcapReader();
+            if (!fileReader.open(inputFile)) {
+                System.exit(1);
+            }
         }
 
         // ── Open output PCAP ──────────────────────────────────────────────
-        OutputStream outputStream;
-        try {
-            outputStream = new BufferedOutputStream(new FileOutputStream(outputFile));
-        } catch (IOException e) {
-            System.err.println("Error: Cannot open output file: " + outputFile);
-            System.exit(1);
-            return;
-        }
-
-        // Write PCAP global header
-        try {
-            PcapReader.writeGlobalHeader(outputStream,
-                    reader.versionMajor, reader.versionMinor,
-                    reader.snaplen, reader.network);
-        } catch (IOException e) {
-            System.err.println("Error writing PCAP header: " + e.getMessage());
-            System.exit(1);
+        OutputStream outputStream = null;
+        if (outputFile != null) {
+            try {
+                outputStream = new BufferedOutputStream(new FileOutputStream(outputFile));
+                // Write PCAP global header (only when reading from file, or hardcode defaults for live)
+                long snaplen = fileReader != null ? fileReader.snaplen : 65535;
+                long network = fileReader != null ? fileReader.network : 1; // Ethernet
+                int vMaj = fileReader != null ? fileReader.versionMajor : 2;
+                int vMin = fileReader != null ? fileReader.versionMinor : 4;
+                
+                PcapReader.writeGlobalHeader(outputStream, vMaj, vMin, snaplen, network);
+            } catch (IOException e) {
+                System.err.println("Error: Cannot open output file: " + outputFile);
+                System.exit(1);
+                return;
+            }
         }
 
         // ── Flow table ────────────────────────────────────────────────────
@@ -143,7 +175,24 @@ public class Main {
         System.out.println("[DPI] Processing packets...\n");
 
         RawPacket raw = new RawPacket();
-        while (reader.readNextPacket(raw)) {
+        boolean running = true;
+        
+        while (running) {
+            boolean packetRead = false;
+            if (liveReader != null) {
+                packetRead = liveReader.readNextPacket(raw);
+                if (!packetRead) {
+                    // Timeout or no packet, loop again
+                    try { Thread.sleep(10); } catch (InterruptedException e) {}
+                    continue; 
+                }
+            } else {
+                packetRead = fileReader.readNextPacket(raw);
+                if (!packetRead) running = false; // EOF
+            }
+
+            if (!packetRead) continue;
+
             totalPackets++;
 
             ParsedPacket parsed = PacketParser.parse(raw);
@@ -156,8 +205,8 @@ public class Main {
 
             // Build five-tuple
             FiveTuple tuple = new FiveTuple(
-                    parsed.srcIpInt,
-                    parsed.dstIpInt,
+                    parsed.srcIpBytes,
+                    parsed.dstIpBytes,
                     parsed.srcPort,
                     parsed.dstPort,
                     parsed.protocol
@@ -244,8 +293,11 @@ public class Main {
             }
         }
 
-        reader.close();
-        try { outputStream.flush(); outputStream.close(); } catch (IOException ignored) {}
+            if (outputStream != null) {
+                try { outputStream.flush(); outputStream.close(); } catch (IOException ignored) {}
+            }
+            if (fileReader != null) fileReader.close();
+            if (liveReader != null) liveReader.close();
 
         // ── Print report (mirrors main_working.cpp output format) ─────────
         System.out.println();
@@ -294,11 +346,11 @@ public class Main {
     }
 
     /** Check if a packet should be blocked given the current rules. */
-    private static boolean isBlocked(int srcIp, AppType app, String sni,
-                                     Set<Integer> blockedIPs,
+    private static boolean isBlocked(byte[] srcIp, AppType app, String sni,
+                                     Set<String> blockedIPs,
                                      Set<AppType> blockedApps,
                                      List<String> blockedDomains) {
-        if (blockedIPs.contains(srcIp)) return true;
+        if (blockedIPs.contains(FiveTuple.ipToString(srcIp))) return true;
         if (blockedApps.contains(app)) return true;
         if (!sni.isEmpty()) {
             String lowerSNI = sni.toLowerCase(Locale.ROOT);
@@ -315,9 +367,11 @@ public class Main {
         System.out.println("==================================================");
         System.out.println();
         System.out.println("Usage: java -jar dpi.jar <input.pcap> <output.pcap> [options]");
+        System.out.println("   or: java -jar dpi.jar -i <interface> [output.pcap] [options]");
         System.out.println();
         System.out.println("Options:");
-        System.out.println("  --block-ip <ip>         Block traffic from source IP");
+        System.out.println("  -i <interface>          Capture from live interface instead of file");
+        System.out.println("  --block-ip <ip>         Block traffic from source IP (IPv4 or IPv6)");
         System.out.println("  --block-app <app>       Block application (YouTube, Facebook, etc.)");
         System.out.println("  --block-domain <domain> Block domain (substring match)");
         System.out.println("  --verbose               Print every packet decision");

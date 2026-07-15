@@ -202,8 +202,8 @@ public class DPIEngine {
             job.payloadLength  = parsed.payloadLength;
             job.tcpFlags       = parsed.tcpFlags;
             job.tuple = new FiveTuple(
-                    parsed.srcIpInt,
-                    parsed.dstIpInt,
+                    parsed.srcIpBytes,
+                    parsed.dstIpBytes,
                     parsed.srcPort,
                     parsed.dstPort,
                     parsed.protocol

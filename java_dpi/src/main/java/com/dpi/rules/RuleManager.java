@@ -18,7 +18,7 @@ public class RuleManager {
 
     // ── IP blocking ────────────────────────────────────────────────────────
     private final ReadWriteLock ipLock     = new ReentrantReadWriteLock();
-    private final Set<Integer>  blockedIPs = new HashSet<>();
+    private final Set<String>   blockedIPs = new HashSet<>();
 
     // ── App blocking ───────────────────────────────────────────────────────
     private final ReadWriteLock appLock     = new ReentrantReadWriteLock();
@@ -37,38 +37,43 @@ public class RuleManager {
     // IP Blocking
     // ====================================================================
 
-    public void blockIP(int ip) {
-        ipLock.writeLock().lock();
-        try {
-            blockedIPs.add(ip);
-            System.out.println("[RuleManager] Blocked IP: " + FiveTuple.ipToString(ip));
-        } finally {
-            ipLock.writeLock().unlock();
-        }
+    public void blockIP(byte[] ip) {
+        if (ip == null) return;
+        String ipStr = FiveTuple.ipToString(ip);
+        blockIP(ipStr);
     }
 
     public void blockIP(String ipStr) {
-        blockIP(FiveTuple.parseIp(ipStr));
-    }
-
-    public void unblockIP(int ip) {
         ipLock.writeLock().lock();
         try {
-            blockedIPs.remove(ip);
-            System.out.println("[RuleManager] Unblocked IP: " + FiveTuple.ipToString(ip));
+            blockedIPs.add(ipStr);
+            System.out.println("[RuleManager] Blocked IP: " + ipStr);
         } finally {
             ipLock.writeLock().unlock();
         }
     }
 
-    public void unblockIP(String ipStr) {
-        unblockIP(FiveTuple.parseIp(ipStr));
+    public void unblockIP(byte[] ip) {
+        if (ip == null) return;
+        unblockIP(FiveTuple.ipToString(ip));
     }
 
-    public boolean isIPBlocked(int ip) {
+    public void unblockIP(String ipStr) {
+        ipLock.writeLock().lock();
+        try {
+            blockedIPs.remove(ipStr);
+            System.out.println("[RuleManager] Unblocked IP: " + ipStr);
+        } finally {
+            ipLock.writeLock().unlock();
+        }
+    }
+
+    public boolean isIPBlocked(byte[] ip) {
+        if (ip == null) return false;
+        String ipStr = FiveTuple.ipToString(ip);
         ipLock.readLock().lock();
         try {
-            return blockedIPs.contains(ip);
+            return blockedIPs.contains(ipStr);
         } finally {
             ipLock.readLock().unlock();
         }
@@ -77,9 +82,7 @@ public class RuleManager {
     public List<String> getBlockedIPs() {
         ipLock.readLock().lock();
         try {
-            List<String> result = new ArrayList<>();
-            for (int ip : blockedIPs) result.add(FiveTuple.ipToString(ip));
-            return result;
+            return new ArrayList<>(blockedIPs);
         } finally {
             ipLock.readLock().unlock();
         }
@@ -240,7 +243,7 @@ public class RuleManager {
      *
      * @return A BlockReason if blocked, or null if the packet should be allowed.
      */
-    public BlockReason shouldBlock(int srcIp, int dstPort, AppType app, String domain) {
+    public BlockReason shouldBlock(byte[] srcIp, int dstPort, AppType app, String domain) {
         if (isIPBlocked(srcIp)) {
             return new BlockReason(BlockReason.Type.IP, FiveTuple.ipToString(srcIp));
         }
