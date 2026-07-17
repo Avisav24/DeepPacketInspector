@@ -6,11 +6,25 @@
 
 ## Quick Start
 
-### Build
+### Build with Maven (recommended)
+
+Maven bundles the pcap4j dependency into an executable fat JAR, which is required for live sniffing:
+
+```bat
+cd java_dpi
+mvn clean package -DskipTests
+```
+
+Output: `target\dpi.jar`
+
+### Build with build.bat (no Maven)
+
 ```bat
 cd java_dpi
 build.bat
 ```
+
+Output: `out\dpi.jar` — **offline PCAP analysis only** (pcap4j is not bundled, so live sniffing is unavailable).
 
 Or manually:
 ```powershell
@@ -25,7 +39,11 @@ jar cfm out\dpi.jar out\MANIFEST.MF -C out com
 
 ### Run
 ```bat
-java -jar out\dpi.jar <input.pcap> <output.pcap> [options]
+REM Offline PCAP analysis
+java -jar target\dpi.jar <input.pcap> <output.pcap> [options]
+
+REM Live interface sniffing (requires Npcap)
+java -jar target\dpi.jar -i <interface> [options]
 ```
 
 ---
@@ -33,33 +51,41 @@ java -jar out\dpi.jar <input.pcap> <output.pcap> [options]
 ## Usage Examples
 
 ```bat
-# Analyze traffic, forward everything
-java -jar out\dpi.jar capture.pcap filtered.pcap
+REM Analyze traffic, forward everything
+java -jar target\dpi.jar capture.pcap filtered.pcap
 
-# Block YouTube
-java -jar out\dpi.jar capture.pcap filtered.pcap --block-app YouTube
+REM Block YouTube
+java -jar target\dpi.jar capture.pcap filtered.pcap --block-app YouTube
 
-# Block multiple apps + a domain + an IP
-java -jar out\dpi.jar capture.pcap filtered.pcap ^
+REM Block multiple apps + a domain + an IP
+java -jar target\dpi.jar capture.pcap filtered.pcap ^
   --block-app YouTube ^
   --block-app Discord ^
   --block-domain facebook ^
   --block-ip 192.168.1.50
 
-# Verbose mode (prints every packet decision)
-java -jar out\dpi.jar capture.pcap filtered.pcap --verbose
+REM Verbose mode (prints every packet decision)
+java -jar target\dpi.jar capture.pcap filtered.pcap --verbose
+
+REM Live sniffing from a network interface (requires Npcap)
+java -jar target\dpi.jar -i "Wi-Fi" --block-app YouTube
+
+REM Multi-threaded engine (LB/FP pipeline)
+java -jar target\dpi.jar capture.pcap filtered.pcap --mt
 ```
 
 ---
 
-## Supported Blocking Options
+## Supported Options
 
 | Option | Description |
 |--------|-------------|
+| `-i <interface>` | Capture from a live network interface instead of a file |
 | `--block-app <name>` | Block by application name |
-| `--block-ip <ip>` | Block by source IP address |
+| `--block-ip <ip>` | Block by source IP address (IPv4 or IPv6) |
 | `--block-domain <domain>` | Block by domain (substring match) |
 | `--verbose` | Show per-packet decisions |
+| `--mt` | Use the multi-threaded engine (`DPIEngine`) |
 
 **Available app names:** Unknown, HTTP, HTTPS, DNS, TLS, QUIC, Google, Facebook, YouTube, Twitter/X, Instagram, Netflix, Amazon, Microsoft, Apple, WhatsApp, Telegram, TikTok, Spotify, Zoom, Discord, GitHub, Cloudflare
 
@@ -72,7 +98,7 @@ java_dpi/
 ├── build.bat                         # Windows build script
 ├── pom.xml                           # Maven build (if Maven is installed)
 └── src/main/java/com/dpi/
-    ├── Main.java                     # CLI entry point (mirrors main_working.cpp)
+    ├── Main.java                     # CLI entry point (single-threaded pipeline)
     ├── types/
     │   ├── AppType.java              # App enum + SNI classification logic
     │   ├── FiveTuple.java            # Flow identifier (src/dst IP+port+protocol)
@@ -83,6 +109,7 @@ java_dpi/
     │   └── PacketAction.java         # FORWARD/DROP/INSPECT/LOG_ONLY
     ├── pcap/
     │   ├── PcapReader.java           # PCAP file reader (no external library)
+    │   ├── LivePcapReader.java       # Live interface capture (pcap4j/Npcap)
     │   └── RawPacket.java            # Raw packet data holder
     ├── parser/
     │   ├── PacketParser.java         # Ethernet/IPv4/TCP/UDP header parser
@@ -148,4 +175,5 @@ RuleManager         ← Checks IP, app, domain, port blocking rules
 ## Requirements
 
 - **Java 11+** (tested on Java 25)
-- No external dependencies
+- Offline PCAP analysis needs no native libraries (pure-Java parser)
+- Live sniffing (`-i`) requires **pcap4j** (bundled by the Maven build) and the **Npcap** driver on Windows — see [../WINDOWS_SETUP.md](../WINDOWS_SETUP.md)

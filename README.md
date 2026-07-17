@@ -1,7 +1,8 @@
-# DPI Engine - Deep Packet Inspection System
-
+# DPI Engine - Deep Packet Inspection System (Java)
 
 This document explains **everything** about this project - from basic networking concepts to the complete code architecture. After reading this, you should understand exactly how packets flow through the system without needing to read the code.
+
+> The engine is implemented in **Java** (see [`java_dpi/`](java_dpi/)). It reads PCAP files (or sniffs a live interface via Npcap), classifies traffic using TLS SNI / HTTP Host / DNS / QUIC inspection, applies blocking rules, and writes the filtered traffic to an output PCAP.
 
 ---
 ## Table of Contents
@@ -10,13 +11,14 @@ This document explains **everything** about this project - from basic networking
 2. [Networking Background](#2-networking-background)
 3. [Project Overview](#3-project-overview)
 4. [File Structure](#4-file-structure)
-5. [The Journey of a Packet (Simple Version)](#5-the-journey-of-a-packet-simple-version)
-6. [The Journey of a Packet (Multi-threaded Version)](#6-the-journey-of-a-packet-multi-threaded-version)
+5. [The Journey of a Packet (Single-threaded)](#5-the-journey-of-a-packet-single-threaded)
+6. [The Journey of a Packet (Multi-threaded)](#6-the-journey-of-a-packet-multi-threaded)
 7. [Deep Dive: Each Component](#7-deep-dive-each-component)
 8. [How SNI Extraction Works](#8-how-sni-extraction-works)
 9. [How Blocking Works](#9-how-blocking-works)
 10. [Building and Running](#10-building-and-running)
 11. [Understanding the Output](#11-understanding-the-output)
+12. [Extending the Project](#12-extending-the-project)
 
 ---
 
@@ -32,11 +34,11 @@ This document explains **everything** about this project - from basic networking
 
 ### What Our DPI Engine Does:
 ```
-User Traffic (PCAP) → [DPI Engine] → Filtered Traffic (PCAP)
-                           ↓
-                    - Identifies apps (YouTube, Facebook, etc.)
-                    - Blocks based on rules
-                    - Generates reports
+User Traffic (PCAP or live interface) → [DPI Engine] → Filtered Traffic (PCAP)
+                                             ↓
+                                      - Identifies apps (YouTube, Facebook, etc.)
+                                      - Blocks based on rules
+                                      - Generates reports
 ```
 
 ---
@@ -128,67 +130,94 @@ TLS Client Hello:
 │ Capture     │ ──► │             │ ──► │ PCAP        │
 │ (input.pcap)│     │ - Parse     │     │ (filtered)  │
 └─────────────┘     │ - Classify  │     └─────────────┘
-                    │ - Block     │
-                    │ - Report    │
-                    └─────────────┘
+      or            │ - Block     │
+┌─────────────┐     │ - Report    │
+│ Live NIC    │ ──► └─────────────┘
+│ (-i "Wi-Fi")│
+└─────────────┘
 ```
 
-### Two Versions
+### Two Pipelines
 
-| Version | File | Use Case |
-|---------|------|----------|
-| Simple (Single-threaded) | `src/main_working.cpp` | Learning, small captures |
-| Multi-threaded | `src/dpi_mt.cpp` | Production, large captures |
+| Pipeline | Entry Point | Use Case |
+|----------|-------------|----------|
+| Single-threaded (default) | `Main.java` | Learning, small captures, live sniffing |
+| Multi-threaded (`--mt` flag) | `engine/DPIEngine.java` | Production, large captures |
+
+Both pipelines share the same components (`PcapReader`, `PacketParser`, `SNIExtractor`, `RuleManager`); the multi-threaded engine adds load balancers, fast-path worker threads, and a dedicated output writer.
+
+### Input Modes
+
+| Mode | How | Requirement |
+|------|-----|-------------|
+| Offline PCAP | `java -jar dpi.jar input.pcap output.pcap` | None (pure Java parser) |
+| Live sniffing | `java -jar dpi.jar -i "Wi-Fi"` | Npcap driver + pcap4j (bundled by Maven) |
 
 ---
 
 ## 4. File Structure
 
 ```
-packet_analyzer/
-├── include/                    # Header files (declarations)
-│   ├── pcap_reader.h          # PCAP file reading
-│   ├── packet_parser.h        # Network protocol parsing
-│   ├── sni_extractor.h        # TLS/HTTP inspection
-│   ├── types.h                # Data structures (FiveTuple, AppType, etc.)
-│   ├── rule_manager.h         # Blocking rules (multi-threaded version)
-│   ├── connection_tracker.h   # Flow tracking (multi-threaded version)
-│   ├── load_balancer.h        # LB thread (multi-threaded version)
-│   ├── fast_path.h            # FP thread (multi-threaded version)
-│   ├── thread_safe_queue.h    # Thread-safe queue
-│   └── dpi_engine.h           # Main orchestrator
-│
-├── src/                        # Implementation files
-│   ├── pcap_reader.cpp        # PCAP file handling
-│   ├── packet_parser.cpp      # Protocol parsing
-│   ├── sni_extractor.cpp      # SNI/Host extraction
-│   ├── types.cpp              # Helper functions
-│   ├── main_working.cpp       # ★ SIMPLE VERSION ★
-│   ├── dpi_mt.cpp             # ★ MULTI-THREADED VERSION ★
-│   └── [other files]          # Supporting code
-│
-├── generate_test_pcap.py      # Creates test data
-├── test_dpi.pcap              # Sample capture with various traffic
-└── README.md                  # This file!
+Packet_analyzer/
+├── README.md                          # This file
+├── WINDOWS_SETUP.md                   # Windows install guide (JDK, Maven, Npcap)
+├── generate_test_pcap.py              # Python utility that creates test data
+├── test_dpi.pcap                      # Sample capture with various traffic
+└── java_dpi/
+    ├── pom.xml                        # Maven build (produces target/dpi.jar)
+    ├── build.bat                      # Plain-javac build (produces out/dpi.jar)
+    ├── README.md                      # Quick-start for the Java module
+    └── src/main/java/com/dpi/
+        ├── Main.java                  # ★ CLI entry point (single-threaded pipeline) ★
+        ├── types/
+        │   ├── AppType.java           # App enum + SNI → app classification
+        │   ├── FiveTuple.java         # Flow identifier (src/dst IP+port+protocol)
+        │   ├── Connection.java        # Per-flow connection state
+        │   ├── PacketJob.java         # Packet wrapper for the MT pipeline
+        │   ├── DPIStats.java          # AtomicLong statistics counters
+        │   ├── ConnectionState.java   # NEW/ESTABLISHED/CLASSIFIED/BLOCKED/CLOSED
+        │   └── PacketAction.java      # FORWARD/DROP/INSPECT/LOG_ONLY
+        ├── pcap/
+        │   ├── PcapReader.java        # PCAP file reader/writer (no native library)
+        │   ├── LivePcapReader.java    # Live capture via pcap4j/Npcap
+        │   └── RawPacket.java         # Raw packet data holder
+        ├── parser/
+        │   ├── PacketParser.java      # Ethernet/IP/TCP/UDP header parser
+        │   └── ParsedPacket.java      # Parsed packet result
+        ├── extractor/
+        │   ├── SNIExtractor.java      # TLS Client Hello SNI extraction
+        │   ├── HTTPHostExtractor.java # HTTP Host header extraction
+        │   ├── DNSExtractor.java      # DNS query domain extraction
+        │   └── QUICSNIExtractor.java  # QUIC Initial packet SNI extraction
+        ├── tracker/
+        │   ├── ConnectionTracker.java # Per-worker flow table
+        │   └── GlobalConnectionTable.java # Aggregated stats from all workers
+        ├── rules/
+        │   └── RuleManager.java       # Thread-safe IP/App/Domain/Port rules
+        └── engine/
+            ├── DPIEngine.java         # ★ MULTI-THREADED ORCHESTRATOR ★
+            ├── FastPathProcessor.java # DPI worker thread
+            ├── LoadBalancer.java      # Consistent-hash packet distributor
+            └── ThreadSafeQueue.java   # Bounded blocking queue
 ```
 
 ---
 
-## 5. The Journey of a Packet (Simple Version)
+## 5. The Journey of a Packet (Single-threaded)
 
-Let's trace a single packet through `main_working.cpp`:
+Let's trace a single packet through `Main.java`:
 
 ### Step 1: Read PCAP File
 
-```cpp
-PcapReader reader;
+```java
+PcapReader reader = new PcapReader();
 reader.open("capture.pcap");
 ```
 
 **What happens:**
-1. Open the file in binary mode
+1. Open the file as a stream
 2. Read the 24-byte global header (magic number, version, etc.)
-3. Verify it's a valid PCAP file
+3. Detect endianness from the magic number and verify it's a valid PCAP file
 
 **PCAP File Format:**
 ```
@@ -207,25 +236,26 @@ reader.open("capture.pcap");
 
 ### Step 2: Read Each Packet
 
-```cpp
+```java
+RawPacket raw = new RawPacket();
 while (reader.readNextPacket(raw)) {
     // raw.data contains the packet bytes
-    // raw.header contains timestamp and length
+    // raw header fields contain timestamp and length
 }
 ```
 
 **What happens:**
 1. Read 16-byte packet header
-2. Read N bytes of packet data (N = header.incl_len)
-3. Return false when no more packets
+2. Read N bytes of packet data (N = included length)
+3. Return `false` when no more packets (EOF)
 
 ### Step 3: Parse Protocol Headers
 
-```cpp
-PacketParser::parse(raw, parsed);
+```java
+ParsedPacket parsed = PacketParser.parse(raw);
 ```
 
-**What happens (in packet_parser.cpp):**
+**What happens (in `PacketParser.java`):**
 
 ```
 raw.data bytes:
@@ -235,21 +265,20 @@ raw.data bytes:
 [54+]    Payload
 
 After parsing:
-parsed.src_mac  = "00:11:22:33:44:55"
-parsed.dest_mac = "aa:bb:cc:dd:ee:ff"
-parsed.src_ip   = "192.168.1.100"
-parsed.dest_ip  = "172.217.14.206"
-parsed.src_port = 54321
-parsed.dest_port = 443
+parsed.srcIp    = "192.168.1.100"
+parsed.dstIp    = "172.217.14.206"
+parsed.srcPort  = 54321
+parsed.dstPort  = 443
 parsed.protocol = 6 (TCP)
-parsed.has_tcp  = true
+parsed.hasTcp   = true
+parsed.payloadOffset / payloadLength → where the application data lives
 ```
 
 **Parsing the Ethernet Header (14 bytes):**
 ```
 Bytes 0-5:   Destination MAC
 Bytes 6-11:  Source MAC
-Bytes 12-13: EtherType (0x0800 = IPv4)
+Bytes 12-13: EtherType (0x0800 = IPv4, 0x86DD = IPv6)
 ```
 
 **Parsing the IP Header (20+ bytes):**
@@ -271,39 +300,42 @@ Byte 12:     Data Offset (header length)
 Byte 13:     Flags (SYN, ACK, FIN, etc.)
 ```
 
+*Network Byte Order:* Network protocols use big-endian (most significant byte first). The parser reads multi-byte fields manually, e.g.:
+```java
+int port = ((data[off] & 0xFF) << 8) | (data[off + 1] & 0xFF);
+```
+
 ### Step 4: Create Five-Tuple and Look Up Flow
 
-```cpp
-FiveTuple tuple;
-tuple.src_ip = parseIP(parsed.src_ip);
-tuple.dst_ip = parseIP(parsed.dest_ip);
-tuple.src_port = parsed.src_port;
-tuple.dst_port = parsed.dest_port;
-tuple.protocol = parsed.protocol;
+```java
+FiveTuple tuple = new FiveTuple(
+        parsed.srcIpBytes, parsed.dstIpBytes,
+        parsed.srcPort, parsed.dstPort, parsed.protocol);
 
-Flow& flow = flows[tuple];  // Get or create
+Flow flow = flows.computeIfAbsent(tuple, t -> new Flow(t));
 ```
 
 **What happens:**
-- The flow table is a hash map: `FiveTuple → Flow`
+- The flow table is a `HashMap<FiveTuple, Flow>`
 - If this 5-tuple exists, we get the existing flow
 - If not, a new flow is created
 - All packets with the same 5-tuple share the same flow
 
 ### Step 5: Extract SNI (Deep Packet Inspection)
 
-```cpp
+```java
 // For HTTPS traffic (port 443)
-if (pkt.tuple.dst_port == 443 && pkt.payload_length > 5) {
-    auto sni = SNIExtractor::extract(payload, payload_length);
-    if (sni) {
-        flow.sni = *sni;                    // "www.youtube.com"
-        flow.app_type = sniToAppType(*sni); // AppType::YOUTUBE
+if (parsed.hasTcp && parsed.dstPort == 443 && parsed.payloadLength > 5) {
+    Optional<String> sni = SNIExtractor.extract(
+            raw.data, parsed.payloadOffset, parsed.payloadLength);
+    if (sni.isPresent()) {
+        flow.sni     = sni.get();                 // "www.youtube.com"
+        flow.appType = AppType.fromSNI(flow.sni); // AppType.YOUTUBE
     }
 }
 ```
 
-**What happens (in sni_extractor.cpp):**
+**What happens (in `SNIExtractor.java`):**
 
 1. **Check if it's a TLS Client Hello:**
    ```
@@ -327,32 +359,37 @@ if (pkt.tuple.dst_port == 443 && pkt.payload_length > 5) {
    ```
 
 4. **Map SNI to App Type:**
-   ```cpp
-   // In types.cpp
-   if (sni.find("youtube") != std::string::npos) {
-       return AppType::YOUTUBE;
+   ```java
+   // In AppType.java
+   public static AppType fromSNI(String sni) {
+       String s = sni.toLowerCase(Locale.ROOT);
+       if (s.contains("youtube")) return YOUTUBE;
+       if (s.contains("facebook")) return FACEBOOK;
+       // ... more patterns
    }
    ```
 
+The same step runs `HTTPHostExtractor` on port 80 traffic (looking for the `Host:` header), classifies port 53 traffic as DNS, and falls back to port-based classification (443 → HTTPS, 80 → HTTP).
+
 ### Step 6: Check Blocking Rules
 
-```cpp
-if (rules.isBlocked(tuple.src_ip, flow.app_type, flow.sni)) {
-    flow.blocked = true;
-}
+```java
+flow.blocked = isBlocked(tuple.srcIp, flow.appType, flow.sni,
+        blockedIPs, blockedApps, blockedDomains);
 ```
 
 **What happens:**
-```cpp
+```java
 // Check IP blacklist
-if (blocked_ips.count(src_ip)) return true;
+if (blockedIPs.contains(FiveTuple.ipToString(srcIp))) return true;
 
 // Check app blacklist
-if (blocked_apps.count(app)) return true;
+if (blockedApps.contains(app)) return true;
 
 // Check domain blacklist (substring match)
-for (const auto& dom : blocked_domains) {
-    if (sni.find(dom) != std::string::npos) return true;
+String lowerSNI = sni.toLowerCase(Locale.ROOT);
+for (String domain : blockedDomains) {
+    if (lowerSNI.contains(domain)) return true;
 }
 
 return false;
@@ -360,38 +397,25 @@ return false;
 
 ### Step 7: Forward or Drop
 
-```cpp
+```java
 if (flow.blocked) {
     dropped++;
     // Don't write to output
 } else {
     forwarded++;
-    // Write packet to output file
-    output.write(packet_header);
-    output.write(packet_data);
+    PcapReader.writePacket(outputStream, raw);
 }
 ```
 
 ### Step 8: Generate Report
 
-After processing all packets:
-```cpp
-// Count apps
-for (const auto& [tuple, flow] : flows) {
-    app_stats[flow.app_type]++;
-}
-
-// Print report
-"YouTube: 150 packets (15%)"
-"Facebook: 80 packets (8%)"
-...
-```
+After processing all packets, the engine prints total/forwarded/dropped counts, an application breakdown with percentage bars, and the list of detected SNIs/domains (see [Section 11](#11-understanding-the-output)).
 
 ---
 
-## 6. The Journey of a Packet (Multi-threaded Version)
+## 6. The Journey of a Packet (Multi-threaded)
 
-The multi-threaded version (`dpi_mt.cpp`) adds **parallelism** for high performance:
+The multi-threaded engine (`DPIEngine.java`, enabled with `--mt`) adds **parallelism** for high performance:
 
 ### Architecture Overview
 
@@ -441,10 +465,10 @@ The multi-threaded version (`dpi_mt.cpp`) adds **parallelism** for high performa
 ```
 Connection: 192.168.1.100:54321 → 142.250.185.206:443
 
-Packet 1 (SYN):         hash → FP2
-Packet 2 (SYN-ACK):     hash → FP2  (same FP!)
+Packet 1 (SYN):          hash → FP2
+Packet 2 (SYN-ACK):      hash → FP2  (same FP!)
 Packet 3 (Client Hello): hash → FP2  (same FP!)
-Packet 4 (Data):        hash → FP2  (same FP!)
+Packet 4 (Data):         hash → FP2  (same FP!)
 
 All packets of this connection go to FP2.
 FP2 can track the flow state correctly.
@@ -452,239 +476,200 @@ FP2 can track the flow state correctly.
 
 ### Detailed Flow
 
-#### Step 1: Reader Thread
+#### Step 1: Reader Thread (in `DPIEngine`)
 
-```cpp
-// Main thread reads PCAP
+```java
 while (reader.readNextPacket(raw)) {
-    Packet pkt = createPacket(raw);
-    
+    PacketJob job = new PacketJob(raw /* + parsed five-tuple */);
+
     // Hash to select Load Balancer
-    size_t lb_idx = hash(pkt.tuple) % num_lbs;
-    
+    int lbIdx = Math.abs(job.tuple.hashCode()) % lbs.size();
+
     // Push to LB's queue
-    lbs_[lb_idx]->queue().push(pkt);
+    lbs.get(lbIdx).getInputQueue().push(job);
 }
 ```
 
-#### Step 2: Load Balancer Thread
+#### Step 2: Load Balancer Thread (`LoadBalancer.java`)
 
-```cpp
-void LoadBalancer::run() {
-    while (running_) {
-        // Pop from my input queue
-        auto pkt = input_queue_.pop();
-        
-        // Hash to select Fast Path
-        size_t fp_idx = hash(pkt.tuple) % num_fps_;
-        
-        // Push to FP's queue
-        fps_[fp_idx]->queue().push(pkt);
+```java
+public void run() {
+    while (running) {
+        PacketJob job = inputQueue.pop(100);
+        if (job == null) continue;
+
+        // Hash to select Fast Path (consistent per flow)
+        int fpIdx = Math.abs(job.tuple.hashCode()) % fpQueues.size();
+        fpQueues.get(fpIdx).push(job);
     }
 }
 ```
 
-#### Step 3: Fast Path Thread
+#### Step 3: Fast Path Thread (`FastPathProcessor.java`)
 
-```cpp
-void FastPath::run() {
-    while (running_) {
-        // Pop from my input queue
-        auto pkt = input_queue_.pop();
-        
-        // Look up flow (each FP has its own flow table)
-        Flow& flow = flows_[pkt.tuple];
-        
-        // Classify (SNI extraction)
-        classifyFlow(pkt, flow);
-        
+```java
+public void run() {
+    while (running) {
+        PacketJob job = inputQueue.pop(100);
+        if (job == null) continue;
+
+        // Look up flow (each FP has its own ConnectionTracker)
+        Connection conn = tracker.getOrCreate(job.tuple);
+
+        // Classify (SNI/Host/DNS/QUIC extraction)
+        classify(job, conn);
+
         // Check rules
-        if (rules_->isBlocked(pkt.tuple.src_ip, flow.app_type, flow.sni)) {
-            stats_->dropped++;
+        if (ruleManager.isBlocked(job.tuple, conn.appType, conn.sni)) {
+            stats.dropped.incrementAndGet();
         } else {
-            // Forward: push to output queue
-            output_queue_->push(pkt);
+            outputHandler.accept(job);   // → output queue
         }
     }
 }
 ```
 
-#### Step 4: Output Writer Thread
+#### Step 4: Output Writer Thread (in `DPIEngine`)
 
-```cpp
-void outputThread() {
-    while (running_ || output_queue_.size() > 0) {
-        auto pkt = output_queue_.pop();
-        
-        // Write to output file
-        output_file.write(packet_header);
-        output_file.write(pkt.data);
+```java
+private void outputThreadFunc() {
+    while (running.get() || !outputQueue.isEmpty()) {
+        PacketJob job = outputQueue.pop(100);
+        if (job != null) {
+            PcapReader.writePacket(outputStream, job.raw);
+        }
     }
 }
 ```
 
 ### Thread-Safe Queue
 
-The magic that makes multi-threading work:
+The glue that makes multi-threading work (`ThreadSafeQueue.java`):
 
-```cpp
-template<typename T>
-class TSQueue {
-    std::queue<T> queue_;
-    std::mutex mutex_;
-    std::condition_variable not_empty_;
-    std::condition_variable not_full_;
-    
-    void push(T item) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push(item);
-        not_empty_.notify_one();  // Wake up waiting consumer
+```java
+public class ThreadSafeQueue {
+
+    private final LinkedBlockingQueue<PacketJob> queue;
+    private volatile boolean shutdown = false;
+
+    /** Push a packet. Blocks if the queue is full (back-pressure). */
+    public void push(PacketJob job) {
+        while (!shutdown) {
+            if (queue.offer(job, 100, TimeUnit.MILLISECONDS)) return;
+        }
     }
-    
-    T pop() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        not_empty_.wait(lock, [&]{ return !queue_.empty(); });
-        T item = queue_.front();
-        queue_.pop();
-        return item;
+
+    /** Pop a packet, blocking until one is available or shutdown. */
+    public PacketJob pop() {
+        while (!shutdown || !queue.isEmpty()) {
+            PacketJob job = queue.poll(100, TimeUnit.MILLISECONDS);
+            if (job != null) return job;
+        }
+        return null;
     }
-};
+}
 ```
 
 **How it works:**
-- `push()`: Producer adds item, signals waiting consumers
-- `pop()`: Consumer waits until item available, then takes it
-- `mutex`: Only one thread can access at a time
-- `condition_variable`: Efficient waiting (no busy-loop)
+- `push()`: Producer adds an item; blocks when the bounded queue is full (back-pressure)
+- `pop()`: Consumer waits until an item is available, then takes it
+- `LinkedBlockingQueue` handles the locking and signalling internally
+- A `volatile shutdown` flag lets consumers drain the queue and exit cleanly
 
 ---
 
 ## 7. Deep Dive: Each Component
 
-### pcap_reader.h / pcap_reader.cpp
+### pcap/PcapReader.java
 
-**Purpose:** Read network captures saved by Wireshark
+**Purpose:** Read and write network captures saved by Wireshark — implemented in pure Java, no libpcap needed.
 
-**Key structures:**
-```cpp
-struct PcapGlobalHeader {
-    uint32_t magic_number;   // 0xa1b2c3d4 identifies PCAP
-    uint16_t version_major;  // Usually 2
-    uint16_t version_minor;  // Usually 4
-    uint32_t snaplen;        // Max packet size captured
-    uint32_t network;        // 1 = Ethernet
-};
-
-struct PcapPacketHeader {
-    uint32_t ts_sec;         // Timestamp (seconds)
-    uint32_t ts_usec;        // Timestamp (microseconds)
-    uint32_t incl_len;       // Bytes saved in file
-    uint32_t orig_len;       // Original packet size
-};
+**Key fields it parses:**
+```
+Global header:  magic (0xa1b2c3d4), versionMajor/Minor, snaplen, network (1 = Ethernet)
+Packet header:  tsSec, tsUsec, inclLen (bytes saved), origLen (original size)
 ```
 
-**Key functions:**
-- `open(filename)`: Open PCAP, validate header
-- `readNextPacket(raw)`: Read next packet into buffer
+**Key methods:**
+- `open(filename)`: Open PCAP, validate the header, detect endianness
+- `readNextPacket(raw)`: Read the next packet into a reusable `RawPacket`
+- `writeGlobalHeader(out, ...)` / `writePacket(out, raw)`: Produce the output PCAP
 - `close()`: Clean up
 
-### packet_parser.h / packet_parser.cpp
+### pcap/LivePcapReader.java
 
-**Purpose:** Extract protocol fields from raw bytes
+**Purpose:** Capture packets in real time from a network interface using **pcap4j** (which talks to the Npcap driver on Windows). It exposes the same `readNextPacket(raw)` interface as `PcapReader`, so the rest of the pipeline doesn't care whether packets come from a file or from the wire.
 
-**Key function:**
-```cpp
-bool PacketParser::parse(const RawPacket& raw, ParsedPacket& parsed) {
-    parseEthernet(...);  // Extract MACs, EtherType
-    parseIPv4(...);      // Extract IPs, protocol, TTL
-    parseTCP(...);       // Extract ports, flags, seq numbers
-    // OR
-    parseUDP(...);       // Extract ports
-}
+### parser/PacketParser.java
+
+**Purpose:** Extract protocol fields from raw bytes.
+
+```java
+ParsedPacket parsed = PacketParser.parse(raw);
+// Ethernet → MACs, EtherType
+// IP       → IPs, protocol, TTL
+// TCP/UDP  → ports, payload offset/length
 ```
 
-**Important concepts:**
+### extractor/ (SNIExtractor, HTTPHostExtractor, DNSExtractor, QUICSNIExtractor)
 
-*Network Byte Order:* Network protocols use big-endian (most significant byte first). Your computer might use little-endian. We use `ntohs()` and `ntohl()` to convert:
-```cpp
-// ntohs = Network TO Host Short (16-bit)
-uint16_t port = ntohs(*(uint16_t*)(data + offset));
-
-// ntohl = Network TO Host Long (32-bit)
-uint32_t seq = ntohl(*(uint32_t*)(data + offset));
-```
-
-### sni_extractor.h / sni_extractor.cpp
-
-**Purpose:** Extract domain names from TLS and HTTP
+**Purpose:** Extract domain names from application payloads.
 
 **For TLS (HTTPS):**
-```cpp
-std::optional<std::string> SNIExtractor::extract(
-    const uint8_t* payload, 
-    size_t length
-) {
-    // 1. Verify TLS record header
-    // 2. Verify Client Hello handshake
-    // 3. Skip to extensions
-    // 4. Find SNI extension (type 0x0000)
-    // 5. Extract hostname string
-}
+```java
+Optional<String> sni = SNIExtractor.extract(payload, offset, length);
+// 1. Verify TLS record header (0x16) and Client Hello (0x01)
+// 2. Skip to extensions
+// 3. Find SNI extension (type 0x0000)
+// 4. Extract hostname string
 ```
 
 **For HTTP:**
-```cpp
-std::optional<std::string> HTTPHostExtractor::extract(
-    const uint8_t* payload,
-    size_t length
-) {
-    // 1. Verify HTTP request (GET, POST, etc.)
-    // 2. Search for "Host: " header
-    // 3. Extract value until newline
+```java
+Optional<String> host = HTTPHostExtractor.extract(payload, offset, length);
+// 1. Verify HTTP request (GET, POST, etc.)
+// 2. Search for "Host: " header
+// 3. Extract value until newline
+```
+
+**For DNS:** `DNSExtractor` decodes the query name from DNS packets (port 53).
+
+**For QUIC:** `QUICSNIExtractor` scans QUIC Initial packets (UDP 443) for the embedded TLS Client Hello.
+
+### types/FiveTuple.java and types/AppType.java
+
+**Purpose:** Core data structures used throughout.
+
+```java
+public final class FiveTuple {
+    final byte[] srcIp;    // 4 bytes (IPv4) or 16 bytes (IPv6)
+    final byte[] dstIp;
+    final int    srcPort;
+    final int    dstPort;
+    final int    protocol;
+    // equals() + hashCode() → usable as a HashMap key
 }
 ```
 
-### types.h / types.cpp
+```java
+public enum AppType {
+    UNKNOWN, HTTP, HTTPS, DNS, TLS, QUIC,
+    GOOGLE, FACEBOOK, YOUTUBE, TWITTER, INSTAGRAM,
+    NETFLIX, AMAZON, MICROSOFT, APPLE, WHATSAPP,
+    TELEGRAM, TIKTOK, SPOTIFY, ZOOM, DISCORD,
+    GITHUB, CLOUDFLARE;
 
-**Purpose:** Define data structures used throughout
-
-**FiveTuple:**
-```cpp
-struct FiveTuple {
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint8_t  protocol;
-    
-    bool operator==(const FiveTuple& other) const;
-};
-```
-
-**AppType:**
-```cpp
-enum class AppType {
-    UNKNOWN,
-    HTTP,
-    HTTPS,
-    DNS,
-    GOOGLE,
-    YOUTUBE,
-    FACEBOOK,
-    // ... more apps
-};
-```
-
-**sniToAppType function:**
-```cpp
-AppType sniToAppType(const std::string& sni) {
-    if (sni.find("youtube") != std::string::npos) 
-        return AppType::YOUTUBE;
-    if (sni.find("facebook") != std::string::npos) 
-        return AppType::FACEBOOK;
-    // ... more patterns
+    public static AppType fromSNI(String sni) { /* substring matching */ }
 }
 ```
+
+### rules/RuleManager.java
+
+**Purpose:** Thread-safe store of blocking rules (IPs, apps, domains, ports) used by the multi-threaded engine. Supports loading/saving rules from a file.
+
+### tracker/ConnectionTracker.java and tracker/GlobalConnectionTable.java
+
+**Purpose:** Each fast-path worker owns a `ConnectionTracker` (its private flow table — no locking needed thanks to consistent hashing). `GlobalConnectionTable` aggregates statistics across all trackers for the final report.
 
 ---
 
@@ -751,54 +736,50 @@ Extension Length: L
 
 ### Our Extraction Code (Simplified)
 
-```cpp
-std::optional<std::string> SNIExtractor::extract(
-    const uint8_t* payload, size_t length
-) {
-    // Check TLS record header
-    if (payload[0] != 0x16) return std::nullopt;  // Not handshake
-    if (payload[5] != 0x01) return std::nullopt;  // Not Client Hello
-    
-    size_t offset = 43;  // Skip to session ID
-    
+```java
+public static Optional<String> extract(byte[] payload, int offset, int length) {
+    if (!isTLSClientHello(payload, offset, length)) return Optional.empty();
+
+    int end = offset + length;
+    int pos = offset + 5;   // Skip TLS record header
+    pos += 4;               // Skip handshake header: type(1) + length(3)
+    pos += 34;              // Skip client_version(2) + random(32)
+
     // Skip Session ID
-    uint8_t session_len = payload[offset];
-    offset += 1 + session_len;
-    
+    int sessionIdLen = payload[pos] & 0xFF;
+    pos += 1 + sessionIdLen;
+
     // Skip Cipher Suites
-    uint16_t cipher_len = readUint16BE(payload + offset);
-    offset += 2 + cipher_len;
-    
+    int cipherSuitesLen = readUint16BE(payload, pos);
+    pos += 2 + cipherSuitesLen;
+
     // Skip Compression Methods
-    uint8_t comp_len = payload[offset];
-    offset += 1 + comp_len;
-    
+    int compressionLen = payload[pos] & 0xFF;
+    pos += 1 + compressionLen;
+
     // Read Extensions Length
-    uint16_t ext_len = readUint16BE(payload + offset);
-    offset += 2;
-    
+    int extensionsLen = readUint16BE(payload, pos);
+    pos += 2;
+    int extensionsEnd = Math.min(pos + extensionsLen, end);
+
     // Search for SNI extension
-    size_t ext_end = offset + ext_len;
-    while (offset + 4 <= ext_end) {
-        uint16_t ext_type = readUint16BE(payload + offset);
-        uint16_t ext_data_len = readUint16BE(payload + offset + 2);
-        offset += 4;
-        
-        if (ext_type == 0x0000) {  // SNI!
-            // Parse SNI structure
-            uint16_t sni_len = readUint16BE(payload + offset + 3);
-            return std::string(
-                (char*)(payload + offset + 5), 
-                sni_len
-            );
+    while (pos + 4 <= extensionsEnd) {
+        int extType   = readUint16BE(payload, pos);
+        int extLength = readUint16BE(payload, pos + 2);
+        pos += 4;
+
+        if (extType == 0x0000) {  // SNI!
+            int sniLen = readUint16BE(payload, pos + 3);
+            return Optional.of(new String(
+                    payload, pos + 5, sniLen, StandardCharsets.US_ASCII));
         }
-        
-        offset += ext_data_len;
+        pos += extLength;
     }
-    
-    return std::nullopt;  // SNI not found
+    return Optional.empty();  // SNI not found
 }
 ```
+
+(Every step in the real `SNIExtractor.java` also bounds-checks `pos` against `end` so malformed packets can't crash the parser.)
 
 ---
 
@@ -808,9 +789,9 @@ std::optional<std::string> SNIExtractor::extract(
 
 | Rule Type | Example | What it Blocks |
 |-----------|---------|----------------|
-| IP | `192.168.1.50` | All traffic from this source |
-| App | `YouTube` | All YouTube connections |
-| Domain | `tiktok` | Any SNI containing "tiktok" |
+| IP | `--block-ip 192.168.1.50` | All traffic from this source (IPv4 or IPv6) |
+| App | `--block-app YouTube` | All YouTube connections |
+| Domain | `--block-domain tiktok` | Any SNI containing "tiktok" |
 
 ### The Blocking Flow
 
@@ -865,53 +846,66 @@ Connection to YouTube:
 
 ### Prerequisites
 
-- **macOS/Linux** with C++17 compiler
-- **g++** or **clang++**
-- No external libraries needed!
+- **Java 11+** (JDK) — see [WINDOWS_SETUP.md](WINDOWS_SETUP.md) for a step-by-step Windows guide
+- **Apache Maven** (recommended) — bundles the pcap4j dependency into a fat JAR
+- **Npcap** (Windows, only needed for live sniffing mode)
 
-### Build Commands
+### Build with Maven (recommended)
 
-**Simple Version:**
-```bash
-g++ -std=c++17 -O2 -I include -o dpi_simple \
-    src/main_working.cpp \
-    src/pcap_reader.cpp \
-    src/packet_parser.cpp \
-    src/sni_extractor.cpp \
-    src/types.cpp
+```cmd
+cd java_dpi
+mvn clean package -DskipTests
 ```
 
-**Multi-threaded Version:**
-```bash
-g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
-    src/dpi_mt.cpp \
-    src/pcap_reader.cpp \
-    src/packet_parser.cpp \
-    src/sni_extractor.cpp \
-    src/types.cpp
+Produces the executable fat JAR at `java_dpi\target\dpi.jar`.
+
+### Build with build.bat (no Maven)
+
+```cmd
+cd java_dpi
+build.bat
 ```
+
+Produces `java_dpi\out\dpi.jar`. Note: this JAR does not bundle pcap4j, so it supports **offline PCAP analysis only** (no live sniffing).
 
 ### Running
 
-**Basic usage:**
-```bash
-./dpi_engine test_dpi.pcap output.pcap
+**Basic usage (offline analysis):**
+```cmd
+java -jar target\dpi.jar test_dpi.pcap output.pcap
+```
+
+**Live sniffing (requires Npcap):**
+```cmd
+java -jar target\dpi.jar -i "Wi-Fi"
 ```
 
 **With blocking:**
-```bash
-./dpi_engine test_dpi.pcap output.pcap \
-    --block-app YouTube \
-    --block-app TikTok \
-    --block-ip 192.168.1.50 \
+```cmd
+java -jar target\dpi.jar test_dpi.pcap output.pcap ^
+    --block-app YouTube ^
+    --block-app TikTok ^
+    --block-ip 192.168.1.50 ^
     --block-domain facebook
 ```
 
-**Configure threads (multi-threaded only):**
-```bash
-./dpi_engine input.pcap output.pcap --lbs 4 --fps 4
-# Creates 4 LB threads × 4 FP threads = 16 processing threads
+**Multi-threaded engine:**
+```cmd
+java -jar target\dpi.jar input.pcap output.pcap --mt
 ```
+
+### Command-line Options
+
+| Option | Description |
+|--------|-------------|
+| `-i <interface>` | Capture from a live interface instead of a file |
+| `--block-ip <ip>` | Block traffic from a source IP (IPv4 or IPv6) |
+| `--block-app <app>` | Block an application (YouTube, Facebook, etc.) |
+| `--block-domain <domain>` | Block a domain (substring match against SNI/Host) |
+| `--verbose` | Print every packet decision |
+| `--mt` | Use the multi-threaded engine (`DPIEngine`) |
+
+**Available app names:** Unknown, HTTP, HTTPS, DNS, TLS, QUIC, Google, Facebook, YouTube, Twitter/X, Instagram, Netflix, Amazon, Microsoft, Apple, WhatsApp, Telegram, TikTok, Spotify, Zoom, Discord, GitHub, Cloudflare
 
 ### Creating Test Data
 
@@ -928,66 +922,56 @@ python3 generate_test_pcap.py
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║              DPI ENGINE v2.0 (Multi-threaded)                 ║
-╠══════════════════════════════════════════════════════════════╣
-║ Load Balancers:  2    FPs per LB:  2    Total FPs:  4        ║
+║                    DPI ENGINE v1.1 (Java)                    ║
 ╚══════════════════════════════════════════════════════════════╝
 
 [Rules] Blocked app: YouTube
 [Rules] Blocked IP: 192.168.1.50
 
-[Reader] Processing packets...
-[Reader] Done reading 77 packets
+[DPI] Processing packets...
+
+[BLOCKED] 192.168.1.100 -> 142.250.185.206 (YouTube: www.youtube.com)
 
 ╔══════════════════════════════════════════════════════════════╗
-║                      PROCESSING REPORT                        ║
+║                      PROCESSING REPORT                       ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Total Packets:                77                              ║
-║ Total Bytes:                5738                              ║
-║ TCP Packets:                  73                              ║
-║ UDP Packets:                   4                              ║
+║ Total Packets:              77                               ║
+║ Forwarded:                  69                               ║
+║ Dropped:                     8                               ║
+║ Active Flows:               25                               ║
 ╠══════════════════════════════════════════════════════════════╣
-║ Forwarded:                    69                              ║
-║ Dropped:                       8                              ║
+║                    APPLICATION BREAKDOWN                     ║
 ╠══════════════════════════════════════════════════════════════╣
-║ THREAD STATISTICS                                             ║
-║   LB0 dispatched:             53                              ║
-║   LB1 dispatched:             24                              ║
-║   FP0 processed:              53                              ║
-║   FP1 processed:               0                              ║
-║   FP2 processed:               0                              ║
-║   FP3 processed:              24                              ║
-╠══════════════════════════════════════════════════════════════╣
-║                   APPLICATION BREAKDOWN                       ║
-╠══════════════════════════════════════════════════════════════╣
-║ HTTPS                39  50.6% ##########                     ║
-║ Unknown              16  20.8% ####                           ║
-║ YouTube               4   5.2% # (BLOCKED)                    ║
-║ DNS                   4   5.2% #                              ║
-║ Facebook              3   3.9%                                ║
-║ ...                                                           ║
+║ HTTPS                39  50.6% ##########                    ║
+║ Unknown              16  20.8% ####                          ║
+║ YouTube               4   5.2% #                             ║
+║ DNS                   4   5.2% #                             ║
+║ Facebook              3   3.9%                               ║
+║ ...                                                          ║
 ╚══════════════════════════════════════════════════════════════╝
 
-[Detected Domains/SNIs]
+[Detected Applications/Domains]
   - www.youtube.com -> YouTube
   - www.facebook.com -> Facebook
   - www.google.com -> Google
   - github.com -> GitHub
-  ...
+
+Output written to: output.pcap
 ```
 
 ### What Each Section Means
 
 | Section | Meaning |
 |---------|---------|
-| Configuration | Number of threads created |
 | Rules | Which blocking rules are active |
-| Total Packets | Packets read from input file |
-| Forwarded | Packets written to output file |
+| Total Packets | Packets read from the input file / interface |
+| Forwarded | Packets written to the output file |
 | Dropped | Packets blocked (not written) |
-| Thread Statistics | Work distribution across threads |
+| Active Flows | Number of distinct 5-tuple flows seen |
 | Application Breakdown | Traffic classification results |
-| Detected SNIs | Actual domain names found |
+| Detected Applications/Domains | Actual domain names found via SNI/Host/DNS |
+
+The multi-threaded engine (`--mt`) additionally prints per-thread statistics (packets dispatched per LB, packets processed per FP).
 
 ---
 
@@ -996,57 +980,31 @@ python3 generate_test_pcap.py
 ### Ideas for Improvement
 
 1. **Add More App Signatures**
-   ```cpp
-   // In types.cpp
-   if (sni.find("twitch") != std::string::npos)
-       return AppType::TWITCH;
+   ```java
+   // In AppType.java — add an enum constant and a pattern in fromSNI()
+   if (s.contains("twitch")) return TWITCH;
    ```
 
 2. **Add Bandwidth Throttling**
-   ```cpp
+   ```java
    // Instead of DROP, delay packets
    if (shouldThrottle(flow)) {
-       std::this_thread::sleep_for(10ms);
+       Thread.sleep(10);
    }
    ```
 
-3. **Add Live Statistics Dashboard**
-   ```cpp
+3. **Add a Live Statistics Dashboard**
+   ```java
    // Separate thread printing stats every second
-   void statsThread() {
-       while (running) {
-           printStats();
-           sleep(1);
-       }
-   }
+   ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+   scheduler.scheduleAtFixedRate(this::printStats, 1, 1, TimeUnit.SECONDS);
    ```
 
-4. **Add QUIC/HTTP3 Support**
-   - QUIC uses UDP on port 443
-   - SNI is in the Initial packet (encrypted differently)
-
-5. **Add Persistent Rules**
-   - Save rules to file
-   - Load on startup
+4. **Expose the rules file / port blocking on the CLI** — `RuleManager` already supports port rules and load/save from file; wiring `--block-port`, `--rules`, and `--save-rules` into `Main.java`'s argument parser is a natural next step.
 
 ---
 
-## Summary
+## Related Documents
 
-This DPI engine demonstrates:
-
-1. **Network Protocol Parsing** - Understanding packet structure
-2. **Deep Packet Inspection** - Looking inside encrypted connections
-3. **Flow Tracking** - Managing stateful connections
-4. **Multi-threaded Architecture** - Scaling with thread pools
-5. **Producer-Consumer Pattern** - Thread-safe queues
-
-The key insight is that even HTTPS traffic leaks the destination domain in the TLS handshake, allowing network operators to identify and control application usage.
-
----
-
-## Questions?
-
-If you have questions about any part of this project, the code is well-commented and follows the same flow described in this document. Start with the simple version (`main_working.cpp`) to understand the concepts, then move to the multi-threaded version (`dpi_mt.cpp`) to see how parallelism is added.
-
-Happy learning! 🚀
+- [WINDOWS_SETUP.md](WINDOWS_SETUP.md) — installing JDK, Maven, and Npcap on Windows
+- [java_dpi/README.md](java_dpi/README.md) — quick-start and module-level reference
